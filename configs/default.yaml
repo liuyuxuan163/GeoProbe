@@ -1,0 +1,82 @@
+# GeoProbe 配置
+#
+# 设计原则：**所有可调参数集中在这里**，代码里不硬编码阈值。
+# 这样"换模型/换层数/换池化方式"都只改一个文件。
+
+model:
+  # 默认用小模型：CPU 就能跑，且小模型的知识编码更弱、歧义效应更明显。
+  # 换大模型只需改 name（如 Qwen/Qwen2.5-1.5B-Instruct）。
+  name: Qwen/Qwen2.5-0.5B-Instruct
+  dtype: float32        # CPU 上用 float32；有 GPU 可改 float16
+  device: cpu           # cpu | cuda
+  trust_remote_code: true
+  # 是否在 mock 模式（不加载模型，用合成向量验证全流程）
+  mock: false
+
+# Mock 模式参数：不加载模型，而是把真实坐标"编码"进合成向量。
+# 用途：让整个 pipeline（探针 → 指标 → 基线 → 报告）在没有 GPU / 模型 / 网络时
+#       也能完整跑通并被测试。signal=true 时探针应该能恢复地理（验证流程正确），
+#       signal=false 时应退化为噪声（验证基线能识破无信号）。
+mock:
+  dim: 32
+  signal: true
+  # 信号强度相对噪声的比例。调大 → 探针几乎完美；调小 → 接近无信号。
+  signal_scale: 5.0
+  noise: 0.2
+
+extract:
+  # 池化方式：决定"用哪些位置的隐层"代表一个词
+  #   last_token   —— 最后一个 token（原课程实验的做法）
+  #   mean         —— 全序列平均
+  #   entity_token —— 只取地名本身的 token 均值（最干净，推荐）
+  pooling: entity_token
+  # 取第几层；null 表示最后一层。layer-sweep 会覆盖这个值。
+  layer: null
+  # 是否在输入里加任务指令。false 更干净（避免"准备输出数字"污染表征）
+  use_instruction: false
+  instruction: "What are the geographic coordinates of {}?"
+
+probe:
+  # Ridge 的 alpha 网格：用训练集内部交叉验证选最优
+  ridge_alphas: [0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]
+  cv_folds: 5
+  # 是否额外训练一个 MLP 探针（用于区分"不存在"与"非线性存在"）
+  mlp: true
+  mlp_hidden: 256
+  mlp_max_iter: 500
+  random_state: 42
+  # ── 目标编码（★ 影响结论可信度的关键旋钮）────────────────────────────
+  #   latlon : 目标 = [lat, lon]，线性。经度是循环量，线性编码对它有偏 ——
+  #            179° 与 -179° 地理上相邻，但在目标空间差 358°。
+  #            第一次真实实验（R²_lon=0.064）就受这个缺陷影响。
+  #   sincos : 目标 = [lat, sin λ, cos λ]，把经度放到单位圆上，
+  #            正确处理 180° 环绕。**推荐用它判断"经度到底能不能解码"。**
+  target_encoding: latlon
+
+evaluation:
+  # 主指标是 Haversine 公里误差，不是 R²（R² 对经纬度取平均没有物理意义）
+  bootstrap_samples: 1000
+  ci: 0.95
+  # 报哪些分位数
+  percentiles: [50, 75, 90]
+  # ── 歧义词「偏向哪个含义」的可靠性门槛（km）──────────────────────────
+  # 只有当**至少一个候选含义**离预测点 ≤ 这个距离时，"偏向"判定才有意义。
+  # 否则（两个候选都在几千公里外）"谁更近"只是噪声 ——
+  # 第一次实验里 6/20 的"偏备选"中有 4 个属于这种情况。
+  alt_reliability_km: 2500
+
+baselines:
+  # 四个基线：没有它们，R² 高也不能下结论
+  random: true          # 随机高维向量 → 探针（下界）
+  char_ngram: true      # 字符 n-gram TF-IDF → 探针（★ 最关键：排除"只是记住拼写"）
+  mean: true            # 永远预测训练集坐标均值（R²=0 的参照）
+  # ★ 置换检验：打乱训练集坐标后用同样的 X 拟合。
+  #   这是判断"探针是否真读到信息"的最严谨做法 ——
+  #   纯噪声特征在"预测均值"基线下也可能碰巧通过，但过不了置换检验。
+  permuted: true
+  char_ngram_range: [1, 3]
+
+report:
+  out_dir: reports
+  # 生成图表需要 matplotlib
+  plots: true

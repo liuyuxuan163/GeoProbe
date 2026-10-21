@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geoprobe"
+version = "0.1.0"
+description = "LLM 地理知识探针：歧义地名的表征偏移分析"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+# 核心依赖：只为了"用真实模型取隐层"。
+# 指标、探针、基线、报告这些逻辑只依赖 numpy + scikit-learn，
+# 所以 --mock 模式下不装 torch/transformers 也能完整跑通（便于 CI 与快速验证）。
+dependencies = [
+    "numpy>=1.22",
+    "scikit-learn>=1.1",
+]
+
+[project.optional-dependencies]
+# 用真实模型时需要
+model = ["torch>=2.0", "transformers>=4.40"]
+# 画地图时需要
+plot = ["matplotlib>=3.6", "pandas>=1.5"]
+# 生成/校准词表坐标时需要
+geo = ["geopy>=2.3"]
+# 开发
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+geoprobe = "geoprobe.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["geoprobe*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

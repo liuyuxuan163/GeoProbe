@@ -1,0 +1,164 @@
+[
+  {
+    "word": "Georgia",
+    "lat": 42.3154, "lon": 43.3569, "label": "格鲁吉亚（国家）",
+    "alt_lat": 32.1656, "alt_lon": -82.9001, "alt_label": "美国佐治亚州",
+    "note": "在美国语境中，佐治亚州的出现频率远高于国家格鲁吉亚 —— 最经典的歧义地名"
+  },
+  {
+    "word": "Turkey",
+    "lat": 38.9637, "lon": 35.2433, "label": "土耳其（国家）",
+    "alt_label": "火鸡（非地理含义）",
+    "note": "既有国家含义也有动物含义；非地理含义无法给坐标，只标记"
+  },
+  {
+    "word": "Chile",
+    "lat": -35.6751, "lon": -71.5430, "label": "智利（国家）",
+    "alt_label": "辣椒 chili（非地理含义，注意拼写差异）",
+    "note": "英文中 chile/chili 常指辣椒"
+  },
+  {
+    "word": "Jordan",
+    "lat": 30.5852, "lon": 36.2384, "label": "约旦（国家）",
+    "alt_label": "人名 Michael Jordan（非地理含义）",
+    "note": "常见英文人名"
+  },
+  {
+    "word": "Congo",
+    "lat": -0.2280, "lon": 23.8866, "label": "刚果共和国",
+    "alt_lat": -4.0383, "alt_lon": 21.7587, "alt_label": "刚果民主共和国",
+    "note": "两个刚果 + 刚果河，三者都常见"
+  },
+  {
+    "word": "Niger",
+    "lat": 17.6078, "lon": 8.0817, "label": "尼日尔（国家）",
+    "alt_lat": 9.0820, "alt_lon": 8.6753, "alt_label": "尼日利亚 Nigeria",
+    "note": "拼写极易与邻国 Nigeria 混淆"
+  },
+  {
+    "word": "Guinea",
+    "lat": 9.9456, "lon": -9.6966, "label": "几内亚（国家）",
+    "alt_lat": -6.3150, "alt_lon": 143.9556, "alt_label": "巴布亚新几内亚",
+    "note": "世界上还有赤道几内亚、几内亚比绍、巴布亚新几内亚"
+  },
+  {
+    "word": "Chad",
+    "lat": 15.4542, "lon": 18.7322, "label": "乍得（国家）",
+    "alt_label": "常见英文人名（非地理含义）",
+    "note": "国家名与人名同形"
+  },
+  {
+    "word": "Mali",
+    "lat": 17.5707, "lon": -3.9962, "label": "马里（国家）",
+    "alt_label": "常见人名 / 泰国旅游地（非主要）",
+    "note": "国家名与人名同形"
+  },
+  {
+    "word": "Cyprus",
+    "lat": 35.1264, "lon": 33.4299, "label": "塞浦路斯（国家）",
+    "alt_label": "柏树 cypress（近音，非地理）",
+    "note": "与 cypress（柏树）近音"
+  },
+  {
+    "word": "Lebanon",
+    "lat": 33.8547, "lon": 35.8623, "label": "黎巴嫩（国家）",
+    "alt_lat": 40.3409, "alt_lon": -76.4114, "alt_label": "美国宾州 Lebanon 市",
+    "note": "美国有多个叫 Lebanon 的城镇"
+  },
+  {
+    "word": "Panama",
+    "lat": 8.5380, "lon": -80.7821, "label": "巴拿马（国家）",
+    "alt_lat": 8.9824, "alt_lon": -79.5199, "alt_label": "巴拿马城",
+    "note": "还有巴拿马帽（实际产自厄瓜多尔）"
+  },
+  {
+    "word": "Mexico",
+    "lat": 23.6345, "lon": -102.5528, "label": "墨西哥（国家）",
+    "alt_lat": 19.4326, "alt_lon": -99.1332, "alt_label": "墨西哥城",
+    "note": "国家与首都同名"
+  },
+  {
+    "word": "Jamaica",
+    "lat": 18.1096, "lon": -77.2975, "label": "牙买加（国家）",
+    "alt_label": "常见人名 / 纽约皇后区地名",
+    "note": "也是常见人名"
+  },
+  {
+    "word": "Washington",
+    "lat": 38.9072, "lon": -77.0369, "label": "华盛顿特区",
+    "alt_lat": 47.7511, "alt_lon": -120.7401, "alt_label": "华盛顿州",
+    "note": "还有乔治·华盛顿（人名）"
+  },
+  {
+    "word": "Santiago",
+    "lat": -33.4489, "lon": -70.6693, "label": "智利圣地亚哥",
+    "alt_lat": 42.8782, "alt_lon": -8.5446, "alt_label": "西班牙圣地亚哥-德孔波斯特拉",
+    "note": "常见西班牙语人名；多国首都同名"
+  },
+  {
+    "word": "Valencia",
+    "lat": 39.4699, "lon": -0.3763, "label": "西班牙瓦伦西亚",
+    "alt_lat": 10.1620, "alt_lon": -68.0077, "alt_label": "委内瑞拉瓦伦西亚",
+    "note": "西班牙与委内瑞拉各有重要城市"
+  },
+  {
+    "word": "York",
+    "lat": 53.9599, "lon": -1.0873, "label": "英国约克",
+    "alt_lat": 40.7128, "alt_lon": -74.0060, "alt_label": "纽约（New York）",
+    "note": "单独说 York 时可能被关联到 New York"
+  },
+  {
+    "word": "Alexandria",
+    "lat": 31.2001, "lon": 29.9187, "label": "埃及亚历山大港",
+    "alt_lat": 38.8048, "alt_lon": -77.0469, "alt_label": "美国弗吉尼亚州亚历山德里亚",
+    "note": "埃及古港 vs 美国弗州城市"
+  },
+  {
+    "word": "Athens",
+    "lat": 37.9838, "lon": 23.7275, "label": "希腊雅典",
+    "alt_lat": 33.9519, "alt_lon": -83.3576, "alt_label": "美国佐治亚州雅典市",
+    "note": "希腊首都 vs 美国同名小城"
+  },
+  {
+    "word": "Memphis",
+    "lat": 29.8447, "lon": 31.2503, "label": "埃及孟菲斯（古都）",
+    "alt_lat": 35.1495, "alt_lon": -90.0490, "alt_label": "美国田纳西州孟菲斯",
+    "note": "古埃及都城 vs 美国音乐名城 —— 后者在语料中可能更常见"
+  },
+  {
+    "word": "Florence",
+    "lat": 43.7696, "lon": 11.2558, "label": "意大利佛罗伦萨",
+    "alt_lat": 34.7998, "alt_lon": -87.6773, "alt_label": "美国阿拉巴马州佛罗伦斯",
+    "note": "也是常见英文人名"
+  },
+  {
+    "word": "Naples",
+    "lat": 40.8518, "lon": 14.2681, "label": "意大利那不勒斯",
+    "alt_lat": 26.1423, "alt_lon": -81.7948, "alt_label": "美国佛罗里达州那不勒斯",
+    "note": "意大利名城 vs 佛州退休城市"
+  },
+  {
+    "word": "Toledo",
+    "lat": 39.8628, "lon": -4.0273, "label": "西班牙托莱多",
+    "alt_lat": 41.6528, "alt_lon": -83.5379, "alt_label": "美国俄亥俄州托莱多",
+    "note": "西班牙古城 vs 美国工业城市"
+  },
+  {
+    "word": "Cordoba",
+    "lat": 37.8882, "lon": -4.7794, "label": "西班牙科尔多瓦",
+    "alt_lat": -31.4201, "alt_lon": -64.1888, "alt_label": "阿根廷科尔多瓦",
+    "note": "西班牙与阿根廷各有重要城市"
+  },
+  {
+    "word": "Granada",
+    "lat": 37.1773, "lon": -3.5986, "label": "西班牙格拉纳达",
+    "alt_lat": 11.9344, "alt_lon": -85.9560, "alt_label": "尼加拉瓜格拉纳达",
+    "note": "西班牙安达卢西亚名城 vs 尼加拉瓜殖民城市"
+  },
+  {
+    "word": "Colombia",
+    "lat": 4.5709, "lon": -74.2973, "label": "哥伦比亚（国家）",
+    "alt_lat": 40.8075, "alt_lon": -73.9626, "alt_label": "Columbia 大学（拼写接近，非同一词）",
+    "note": "与 Columbia（大学/特区/运动品牌）差一个字母，是最容易混淆的一类"
+  }
+]
