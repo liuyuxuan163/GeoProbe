@@ -40,7 +40,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 START = "<!-- AUTO-RESULTS:START -->"
 END = "<!-- AUTO-RESULTS:END -->"
-NOTE = "<!-- 本段由 scripts/update_readme.py 从 reports/result.json 自动生成，请勿手改 -->"
+NOTE = (
+    "<!-- 本段由 scripts/update_readme.py 从 reports/result.<模型>.<编码>.json "
+    "自动生成，请勿手改 -->"
+)
 
 # 「偏向判定」的可靠性门槛（km）。与 configs/default.yaml 的
 # evaluation.alt_reliability_km 保持一致；用于兼容没有 reliable 字段的旧结果文件。
@@ -150,7 +153,12 @@ def diagnose(payload: Dict[str, Any]) -> List[str]:
             )
 
     # ④ 误差分布的形状
-    median_km = control.get("median_km")
+    #
+    # ⚠ 必须用同一口径的数字。`control.median_km` 是**最后一次划分**的值，
+    #   而上面主结果表用的是 `repeats.median_mean_km`（多次平均）。
+    #   两者混在一段话里会自相矛盾（本项目真实出现过：表格 2,980、正文 3,485）。
+    repeats_control = repeats.get("control", {})
+    median_km = repeats_control.get("median_mean_km") or control.get("median_km")
     mean_km = control.get("mean_km")
     p90 = control.get("p90_km")
     if median_km and mean_km:
@@ -160,6 +168,7 @@ def diagnose(payload: Dict[str, Any]) -> List[str]:
             f"**误差是长尾分布**：中位 {_fmt(median_km)}、均值 {_fmt(mean_km)}"
             f"（均值/中位 = {skew:.1f}），{tail}。"
             "说明大部分词能定到大致区域，但有少数被放到了地球另一端。"
+            "（均值与 P90 取自单次划分，中位为多次重复平均。）"
         )
 
     # ⑤ 歧义效应

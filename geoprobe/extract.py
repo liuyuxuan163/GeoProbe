@@ -49,7 +49,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
-from .config import Config
+from .config import Config, output_paths
 from .wordlists import WordList
 
 __all__ = [
@@ -59,6 +59,9 @@ __all__ = [
     "MockExtractor",
     "build_extractor",
     "extract_dataset",
+    "check_memory_budget",
+    "estimate_model_memory_gb",
+    "find_cached_activations",
     "POOLING_MODES",
 ]
 
@@ -314,8 +317,13 @@ class ActivationExtractor:
         dtype_map = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
         dtype = dtype_map.get(self.dtype_name, torch.float32)
         if self.device == "cpu" and dtype == torch.float16:
-            # CPU 上 fp16 前向很慢且有兼容问题，强制退回 fp32
-            dtype = torch.float32
+            # CPU 上 fp16 的算子支持不完整（很多 op 未实现），退回 bf16 而不是 fp32 ——
+            # bf16 在 CPU 上支持良好，且同样只有一半显存/内存占用。
+            dtype = torch.bfloat16
+            print("[提示] CPU 不支持稳定的 float16 前向，已自动改用 bfloat16（同样省一半内存）")
+
+        # ★ 载入前先估算内存，不够就提前失败并给出可操作建议（而不是 OOM 崩溃）
+        check_memory_budget(self.model_name, str(dtype).replace("torch.", ""), self.device)
 
         self._tokenizer = AutoTokenizer.from_pretrained(
             self.model_name, trust_remote_code=self.trust_remote_code
@@ -467,3 +475,165 @@ def extract_dataset(
             )
         out[group] = result
     return out
+
+
+# --------------------------------------------------------------------------- #
+# 内存预算估算：把 OOM 崩溃变成"提前失败 + 可操作建议"
+# --------------------------------------------------------------------------- #
+
+#: 每参数字节数
+_BYTES_PER_PARAM = {"float32": 4.0, "float16": 2.0, "bfloat16": 2.0}
+
+#: 加载开销倍数：权重之外还要放激活、注意力缓冲、tokenizer 等。
+#: 实测 0.5B fp32 峰值约 2.4 GB（权重 2.0 GB），所以 1.25 倍是偏乐观的下限。
+_OVERHEAD_FACTOR = 1.35
+
+
+def _parse_param_count(model_name: str) -> Optional[float]:
+    """从模型名里猜参数量（单位：十亿）。
+
+    支持 ``Qwen2.5-0.5B`` / ``Llama-3.2-1B`` / ``xxx-7b`` 这类常见写法。
+    猜不出来返回 ``None``（此时跳过预检，不阻塞用户）。
+    """
+    import re
+
+    name = model_name.rstrip("/").split("/")[-1]
+    # 优先匹配带 B 的（0.5B, 1.5B, 7B），其次匹配纯数字+B 结尾
+    match = re.search(r"(\d+(?:\.\d+)?)\s*[bB](?![a-zA-Z])", name)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def estimate_model_memory_gb(model_name: str, dtype: str = "float32") -> Optional[float]:
+    """估算加载某个模型需要的峰值内存/显存（GB）。
+
+    这只是**粗略估算**（参数量 × 每参数字节 × 开销倍数），
+    用途是提前给出警告，不是精确预测。返回 ``None`` 表示无法从名字推断参数量。
+    """
+    params_b = _parse_param_count(model_name)
+    if params_b is None:
+        return None
+    bytes_per_param = _BYTES_PER_PARAM.get(dtype, 4.0)
+    return params_b * 1e9 * bytes_per_param * _OVERHEAD_FACTOR / 1024**3
+
+
+def _available_memory_gb(device: str) -> Optional[float]:
+    """当前可用的内存（CPU）或显存（CUDA），单位 GB。"""
+    if device.startswith("cuda"):
+        try:
+            import torch
+
+            free, _total = torch.cuda.mem_get_info()
+            return free / 1024**3
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        import psutil
+
+        return psutil.virtual_memory().available / 1024**3
+    except ImportError:
+        return None
+
+
+def check_memory_budget(model_name: str, dtype: str, device: str = "cpu") -> None:
+    """载入模型前检查内存是否够用。**不够就提前失败，并给出具体建议。**
+
+    为什么要做这件事
+    ----------------
+    OOM 的失败方式很糟：跑了几分钟、下载了几 GB 权重，然后在某次前向时崩溃，
+    留下的报错是 ``RuntimeError: [enforce fail at alloc_cpu.cpp]`` 之类，
+    完全看不出"是内存不够、该怎么改"。而且可能把系统拖进交换区，卡死很久。
+
+    提前估算后，失败发生在**下载之前**，并且直接告诉用户三条出路：
+    换更小的模型 / 用 bf16 / 关掉其他程序。
+
+    Notes:
+        估算猜不出参数量时（``estimate_model_memory_gb`` 返回 ``None``）直接放行 ——
+        宁可偶尔 OOM，也不要用错误的估算挡住用户。
+    """
+    needed = estimate_model_memory_gb(model_name, dtype)
+    if needed is None:
+        return
+    available = _available_memory_gb(device)
+    if available is None:
+        return
+
+    if needed <= available:
+        return
+
+    where = "显存" if device.startswith("cuda") else "内存"
+    alt_dtype = "bfloat16" if dtype == "float32" else "更小的模型"
+    raise MemoryError(
+        f"预计 {where} 不足，已在加载前中止（避免 OOM 崩溃）。\n"
+        f"  模型      : {model_name}\n"
+        f"  精度      : {dtype}\n"
+        f"  预计需要  : {needed:.1f} GB\n"
+        f"  当前可用  : {available:.1f} GB（{where}）\n"
+        "\n三条出路：\n"
+        f"  1. 降低精度：加 --dtype bfloat16（内存减半 → 约 {needed / 2:.1f} GB）\n"
+        "  2. 换更小的模型：例如 Qwen/Qwen2.5-0.5B-Instruct 约需 2.7 GB\n"
+        "  3. 关掉其他占用内存的程序后重试（浏览器 / IDE / 其他 Python 进程）\n"
+        "\n想看每个候选模型的预估需求：python -m geoprobe models"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 缓存查找：文件名带模型标识，防止误用别的模型的激活
+# --------------------------------------------------------------------------- #
+
+
+def find_cached_activations(
+    config: Any,
+    groups: Optional[Sequence[str]] = None,
+) -> tuple[Dict[str, "ExtractResult"], List[Path]]:
+    """按当前配置查找缓存的隐层激活。
+
+    查找顺序（前者优先）：
+
+    1. ``activations.<model>.<group>.npz`` —— 当前命名（带模型标识）
+    2. ``activations.<group>.npz`` —— 旧命名，**仅在模型名匹配时**才使用
+
+    第 2 条是为了兼容早期跑过的缓存。但会校验文件里记录的 ``model_name``，
+    避免把 0.5B 的激活当成 1.5B 的用 —— 那会让整个对比无声地错掉。
+
+    Returns:
+        ``(cached, missing)``：找到的字典 + 缺失的文件路径列表。
+    """
+    groups = list(groups or ("control", "ambiguous", "nongeo"))
+    out = config.out_dir()
+    template = output_paths(config)["activations"]
+    expected_model = str(config.get("model.name"))
+    expected_mock = bool(config.get("model.mock"))
+
+    cached: Dict[str, ExtractResult] = {}
+    missing: List[Path] = []
+
+    for group in groups:
+        new_path = Path(str(template).replace("{group}", group))
+        legacy_path = out / f"activations.{group}.npz"
+
+        chosen: Optional[Path] = None
+        if new_path.exists():
+            chosen = new_path
+        elif legacy_path.exists():
+            chosen = legacy_path
+
+        if chosen is None:
+            missing.append(new_path)
+            continue
+
+        result = ExtractResult.load(chosen)
+        # 校验：旧命名文件必须确认是同一个模型，否则拒绝使用
+        if chosen == legacy_path:
+            if result.mock != expected_mock or (
+                not expected_mock and result.model_name != expected_model
+            ):
+                missing.append(new_path)
+                continue
+        cached[group] = result
+
+    return cached, missing

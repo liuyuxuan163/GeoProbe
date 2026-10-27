@@ -145,12 +145,16 @@ class TestPooledR2:
         from geoprobe.experiment import run_experiment
 
         config, lists, cached = self._setup()
+        n_repeats = 4
         result = run_experiment(
             config, lists=lists, extract_results=cached, layer=2,
-            n_repeats=4, run_baselines=False,
+            n_repeats=n_repeats, run_baselines=False,
         )
-        # 108 个词 × 20% 留出 = 22 个，4 次重复 → 约 88
-        assert result.pooled_n == pytest.approx(88, abs=4)
+        # ⚠ 不要写死期望值：词表会变（这个项目就从 108 扩到了 319），
+        #   写死 88 会在词表一变就误报失败。改为按实际词数推算。
+        n_words = len(lists["control"])
+        expected = round(n_words * 0.2) * n_repeats
+        assert result.pooled_n == pytest.approx(expected, abs=n_repeats)
 
     def test_single_split_r2_is_unstable(self):
         """单次划分的 R² 会在不同 seed 下波动 —— 这是必须汇总的原因。

@@ -12,10 +12,11 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-__all__ = ["Config", "load_config", "loads_yaml"]
+__all__ = ["Config", "load_config", "loads_yaml", "model_slug", "output_paths"]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -121,6 +122,10 @@ class Config:
         path = Path(relative)
         return path if path.is_absolute() else self.root / path
 
+    def out_dir(self) -> Path:
+        """报告输出目录。"""
+        return self.path_of(str(self.get("report.out_dir", "reports")))
+
     def as_dict(self) -> Dict[str, Any]:
         import copy
 
@@ -133,6 +138,65 @@ class Config:
             f"pooling={self.get('extract.pooling')} "
             f"layer={self.get('extract.layer')}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# 输出文件命名：把「模型」和「编码」都编进文件名
+# --------------------------------------------------------------------------- #
+#
+# **为什么必须这么做（同一个 bug 已经犯了三次）**
+# ------------------------------------------------
+#   ① `run --mock` 与真实结果都写 `result.json`     → Mock 覆盖真实结果
+#   ② latlon 与 sincos 都写 `layer_sweep.json`      → 换编码重跑冲掉上一次
+#   ③ 0.5B / 1.5B / 3B 都写 `result.sincos.json`    → 换模型冲掉上一次
+#
+# 每一次都是"文件名里少了一个区分维度"。
+# 现在把**模型标识**与**目标编码**一起编进文件名，从机制上不可能互相覆盖。
+
+
+def model_slug(config: Config) -> str:
+    """把模型名压成可用作文件名的短标识。
+
+    ``Qwen/Qwen2.5-0.5B-Instruct`` → ``qwen2.5-0.5b-instruct``
+
+    Mock 模式下固定返回 ``mock``（没有真实模型）。
+    """
+    if config.get("model.mock"):
+        return "mock"
+    raw = str(config.get("model.name") or "unknown")
+    # 兼容"本地目录"形式的模型名：Windows 用反斜杠、POSIX 用斜杠。
+    # 例如 D:\models\Qwen2.5-3B-Instruct → Qwen2.5-3B-Instruct
+    name = re.split(r"[\\/]+", raw.rstrip("\\/"))[-1] or raw
+    slug = name.lower()
+    # 只保留字母数字与 . -，其余压成单个连字符
+    slug = re.sub(r"[^a-z0-9.\-]+", "-", slug).strip("-")
+    return slug or "unknown"
+
+
+def output_paths(config: Config) -> Dict[str, Path]:
+    """当前配置对应的全部输出路径。
+
+    命名约定::
+
+        reports/result.<model>.<encoding>.json
+        reports/layer_sweep.<model>.<encoding>.json
+        reports/report.<model>.<encoding>.md
+        reports/activations.<model>.<group>.npz
+
+    这样换模型 / 换编码重跑时，**旧结果不会被覆盖**，可以事后横向对比。
+    """
+    out = config.out_dir()
+    slug = model_slug(config)
+    encoding = str(config.get("probe.target_encoding", "latlon"))
+    return {
+        "result": out / f"result.{slug}.{encoding}.json",
+        "layer_sweep": out / f"layer_sweep.{slug}.{encoding}.json",
+        "report": out / f"report.{slug}.{encoding}.md",
+        "activations": out / f"activations.{slug}.{{group}}.npz",
+        "encoding_comparison": out / f"encoding_comparison.{slug}.json",
+        "model_slug": slug,
+        "encoding": encoding,
+    }
 
 
 def load_config(path: Optional[str | Path] = None, overrides: Optional[Dict[str, Any]] = None) -> Config:

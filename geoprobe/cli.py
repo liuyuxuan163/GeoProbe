@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from .config import load_config
+from .config import load_config, output_paths
 from .experiment import run_experiment, save_result
 from .report import render_markdown, write_report
 from .wordlists import load_wordlists
@@ -39,6 +39,8 @@ def _apply_common(config, args: argparse.Namespace):
         config.set("extract.pooling", args.pooling)
     if getattr(args, "target_encoding", None):
         config.set("probe.target_encoding", args.target_encoding)
+    if getattr(args, "dtype", None):
+        config.set("model.dtype", args.dtype)
     if getattr(args, "layer", None) is not None:
         config.set("extract.layer", args.layer)
     if getattr(args, "device", None):
@@ -98,6 +100,87 @@ def cmd_info(args: argparse.Namespace) -> int:
     return EXIT_OK if payload["ok"] else EXIT_FAIL
 
 
+def cmd_models(args: argparse.Namespace) -> int:
+    """列出候选模型的**内存预估**与可行性，并显示已跑过的缓存。
+
+    为什么需要这个命令
+    ------------------
+    换更大模型是这个项目最重要的下一步（P0），但"能不能跑得动"完全取决于本机内存。
+    与其等到加载时 OOM 崩溃，不如先给一张表看清楚。
+
+    **只看预估，不下载任何东西。**
+    """
+    from .extract import _available_memory_gb, estimate_model_memory_gb
+
+    candidates = [
+        ("Qwen/Qwen2.5-0.5B-Instruct", "最小，CPU 秒级"),
+        ("Qwen/Qwen2.5-1.5B-Instruct", "中等，CPU 可跑"),
+        ("Qwen/Qwen2.5-3B-Instruct", "较大，需要充足内存"),
+        ("Qwen/Qwen2.5-7B-Instruct", "通常需要 GPU"),
+        ("meta-llama/Llama-3.2-1B-Instruct", "跨模型对照"),
+    ]
+    available = _available_memory_gb("cpu")
+    print("候选模型的内存预估（不含缓存激活）")
+    print("=" * 92)
+    print(f"{'模型':<38}{'fp32':>10}{'bf16':>10}{'可行性':>16}")
+    print("-" * 92)
+
+    for name, note in candidates:
+        fp32 = estimate_model_memory_gb(name, "float32")
+        bf16 = estimate_model_memory_gb(name, "bfloat16")
+        fp32_s = f"{fp32:.1f} GB" if fp32 else "—"
+        bf16_s = f"{bf16:.1f} GB" if bf16 else "—"
+        if available is None or bf16 is None:
+            verdict = "未知"
+        elif bf16 <= available:
+            verdict = "✅ bf16 可跑"
+        elif fp32 <= available:
+            verdict = "⚠ 只能 fp32"
+        else:
+            verdict = "❌ 内存不足"
+        print(f"{name:<38}{fp32_s:>10}{bf16_s:>10}{verdict:>16}")
+
+    print("-" * 92)
+    if available is not None:
+        print(f"当前可用内存：{available:.1f} GB（CPU）")
+        print("提示：3B 的 bf16 约需 7.5 GB —— 关掉浏览器/IDE 通常能腾出几个 GB。")
+        print("      如果内存一直不够，建议换一台有 GPU 的机器跑 3B。")
+
+    # 已经跑过哪些模型（看缓存）
+    print()
+    print("已缓存激活（reports/activations.*.npz）")
+    print("=" * 92)
+    out = load_config(args.config).out_dir()
+    from .extract import ExtractResult
+
+    found = False
+    for path in sorted(out.glob("activations.*.npz")):
+        # ⚠ 不能用 split(".") 判断 —— 模型 slug 里本身含点号
+        #（`qwen2.5-1.5b-instruct`），按点切会切错。用前后缀匹配。
+        stem = path.stem
+        if not (stem.startswith("activations.") and stem.endswith(".control")):
+            continue
+        slug = stem[len("activations.") : -len(".control")]
+        try:
+            result = ExtractResult.load(path)
+        except Exception:  # noqa: BLE001
+            continue
+        found = True
+        label = "mock（合成向量）" if result.mock else result.model_name
+        print(
+            f"  {label:<38} {len(result.layers):>2} 层 × {result.matrix().shape[1]:>4} 维  "
+            f"（{len(result.words)} 词）　文件名 slug={slug}"
+        )
+    if not found:
+        print("  （还没有缓存。跑一次：python -m geoprobe layer-sweep）")
+
+    print()
+    print("跑不同模型的命令示例：")
+    for name, _note in candidates[:3]:
+        print(f"  python -m geoprobe layer-sweep --model-name {name} --dtype bfloat16")
+    return EXIT_OK
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """只做数据校验，不跑实验（快速确认词表没问题）。"""
     config = load_config(args.config)
@@ -130,17 +213,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     # --from-cache：复用 layer-sweep 留下的隐层缓存，跳过模型前向（省 30 秒以上）
     extract_results = None
     if getattr(args, "from_cache", False):
-        out_dir = config.path_of(str(config.get("report.out_dir", "reports")))
-        from .extract import ExtractResult
+        from .extract import ExtractResult, find_cached_activations
 
-        cached = {}
-        for group in lists:
-            path = out_dir / f"activations.{group}.npz"
-            if not path.exists():
-                print(f"[FAIL] 缺少缓存：{path}")
-                print("       请先跑一次逐层扫描生成缓存：python -m geoprobe layer-sweep")
-                return EXIT_FAIL
-            cached[group] = ExtractResult.load(path)
+        # 缓存文件名带模型标识 → 换模型不会互相覆盖，也不会误用别的模型的缓存
+        cached, missing = find_cached_activations(config, list(lists))
+        if missing:
+            print(f"[FAIL] 缺少缓存：{[p.name for p in missing]}")
+            print("       请先为**这个模型**跑一次逐层扫描生成缓存：")
+            print(f"             python -m geoprobe layer-sweep"
+                  + (f" --model-name {config.get('model.name')}" if not config.get("model.mock") else " --mock"))
+            print("       不同模型的激活不能混用 —— 文件名里带模型标识就是为了防止这个。")
+            return EXIT_FAIL
         available = cached["control"].layers
         print(f"复用缓存隐层：{len(available)} 层（{available[0]}~{available[-1]}）")
         if args.layer is not None and int(args.layer) not in available:
@@ -165,18 +248,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     else:
         print(render_markdown(result, title=args.title or "GeoProbe 实验报告"))
 
-    out_dir = config.path_of(str(config.get("report.out_dir", "reports")))
-    md_path = write_report(result, out_dir, args.out or "report.md")
-    # ★ 文件名同时带上 mock/真实 与 编码方式。
-    # 早期版本都写 result.json，踩了两次坑：
-    #   ① 一次 `run --mock` 把真实结果冲掉了；
-    #   ② 换 target_encoding 重跑时，两次结果互相覆盖。
-    encoding = str(config.get("probe.target_encoding", "latlon"))
-    stem = f"result.mock.{encoding}" if config.get("model.mock") else f"result.{encoding}"
-    json_path = save_result(result, out_dir / f"{stem}.json")
+    # ★ 文件名把「模型」与「目标编码」都编进去。
+    # 同一个"少一个区分维度"的 bug 已经犯了三次：
+    #   ① `run --mock` 与真实结果都写 result.json      → Mock 冲掉真实结果
+    #   ② latlon 与 sincos 都写 layer_sweep.json       → 换编码冲掉上一次
+    #   ③ 0.5B / 1.5B / 3B 都写 result.sincos.json     → 换模型冲掉上一次
+    paths = output_paths(config)
+    md_path = write_report(result, paths["report"].parent, args.out or paths["report"].name)
+    json_path = save_result(result, paths["result"])
     print()
     print(f"[OK] 报告：{md_path}")
     print(f"[OK] 数据：{json_path}")
+    print(f"     模型标识 {paths['model_slug']}　编码 {paths['encoding']}　"
+          "（换模型/编码重跑不会覆盖这份结果）")
     if config.get("model.mock"):
         print("     注意：这是 Mock（合成向量）结果，不能代表真实模型表现。")
     return EXIT_OK
@@ -236,12 +320,12 @@ def cmd_layer_sweep(args: argparse.Namespace) -> int:
         print("[FAIL] 没有可用层")
         return EXIT_FAIL
 
-    # 缓存到磁盘，方便事后复用（不必再跑一遍模型）
-    cache_path = config.path_of(str(config.get("report.out_dir", "reports"))) / "activations.npz"
+    # 缓存到磁盘：文件名带**模型标识**，换模型不会互相覆盖
+    paths = output_paths(config)
     try:
         for group, extract in extract_results.items():
-            extract.save(cache_path.with_name(f"activations.{group}.npz"))
-        print(f"隐层已缓存：{cache_path.parent}\\activations.<group>.npz")
+            extract.save(Path(str(paths["activations"]).replace("{group}", group)))
+        print(f"隐层已缓存：{paths['activations'].name.replace('{group}', '<group>')}")
     except Exception as exc:  # noqa: BLE001 - 缓存失败不该中断实验
         print(f"⚠ 缓存失败（不影响实验）：{exc}")
 
@@ -276,13 +360,12 @@ def cmd_layer_sweep(args: argparse.Namespace) -> int:
             f"汇总R²(lat/lon) {result.pooled_r2_lat:>5.2f}/{result.pooled_r2_lon:>5.2f}"
         )
 
-    out_dir = config.path_of(str(config.get("report.out_dir", "reports")))
+    out_dir = config.out_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ★ 文件名带上编码方式：否则 latlon 与 sincos 两次扫描会互相覆盖。
-    #   （这是本项目真实踩过的坑：第一次扫描的结果被第二次冲掉了。）
+    # ★ 文件名带「模型 + 编码」：换模型或换编码都不会覆盖上一次的扫描
     encoding = str(config.get("probe.target_encoding", "latlon"))
-    payload = out_dir / f"layer_sweep.{encoding}.json"
+    payload = paths["layer_sweep"]
     document = {
         "_meta": {
             "model": str(config.get("model.name")),
@@ -290,7 +373,12 @@ def cmd_layer_sweep(args: argparse.Namespace) -> int:
             "target_encoding": encoding,
             "use_instruction": bool(config.get("extract.use_instruction")),
             "n_repeats": n_repeats,
-            "test_size": float(args.test_size or 0.2),
+            # 用 getattr 兜底：`--test-size` 曾经只注册在 `run` 子命令上，
+            # 于是 `layer-sweep` 走到这一行就 AttributeError 崩掉 ——
+            # 而且是在**提取 + 缓存都成功之后**才崩，所以缓存有了、结果文件没写，
+            # 现象很难解释（本项目真实踩过：3B 跑完报 AttributeError，
+            # 但 activations.qwen2.5-3b-instruct.*.npz 其实是好的）。
+            "test_size": float(getattr(args, "test_size", None) or 0.2),
             "n_control": len(lists["control"]),
             "n_ambiguous": len(lists["ambiguous"]),
             "layers_scanned": layers,
@@ -303,6 +391,7 @@ def cmd_layer_sweep(args: argparse.Namespace) -> int:
     # 顺手给出"最佳层"，省得人工看表
     best = min(rows, key=lambda row: row["control_median_km"])
     print(f"\n[OK] 逐层结果：{payload}")
+    print(f"     模型 {paths['model_slug']}　编码 {encoding}（换模型/编码重跑不会覆盖）")
     print(
         f"最佳层：layer {best['layer']}（control {best['control_median_km']:,.0f} km，"
         f"汇总R²(lat/lon) {best['pooled_r2_lat']:.2f}/{best['pooled_r2_lon']:.2f}）"
@@ -332,6 +421,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_check = sub.add_parser("check", help="只校验词表数据")
     p_check.set_defaults(func=cmd_check)
 
+    p_models = sub.add_parser("models", help="列出候选模型的内存预估与已缓存模型")
+    p_models.set_defaults(func=cmd_models)
+
+    # 表征几何：范数 / 层间旋转 / 有效维度（只用缓存，不需要 lm_head）
+    from .geometry_cli import cmd_geometry
+
+    p_geo = sub.add_parser(
+        "geometry", help="表征几何：残差流范数、层间旋转、有效维度（替代失效的 logit lens）"
+    )
+    p_geo.add_argument("--model", nargs="+", help="只分析这些模型 slug（默认全部已缓存）")
+    p_geo.set_defaults(func=cmd_geometry)
+
+    # logit lens：检验「深层被下一词预测挤压」这个假设
+    from .lens_cli import cmd_logit_lens
+    from .lens import LENS_MODES
+
+    p_lens = sub.add_parser(
+        "logit-lens", help="把中间层直接投影到词表，检验「深层被下一词预测挤压」"
+    )
+    p_lens.add_argument("--model-name", help="覆盖配置里的模型名")
+    p_lens.add_argument("--dtype", choices=["float32", "float16", "bfloat16"])
+    p_lens.add_argument("--device", choices=["cpu", "cuda"])
+    p_lens.add_argument(
+        "--mode",
+        choices=list(LENS_MODES),
+        default="bare",
+        help="bare=裸地名（与主实验一致）| prompt=带地理提示的句子",
+    )
+    p_lens.add_argument("--limit", type=int, help="只用前 N 个词（快速试跑）")
+    p_lens.set_defaults(func=cmd_logit_lens)
+
     for name, func, help_text in (
         ("run", cmd_run, "跑完整实验并生成报告"),
         ("layer-sweep", cmd_layer_sweep, "逐层扫描"),
@@ -346,8 +466,14 @@ def build_parser() -> argparse.ArgumentParser:
         )
         p.add_argument("--layer", type=int, help="用第几层（默认最后一层）")
         p.add_argument("--device", choices=["cpu", "cuda"])
+        p.add_argument(
+            "--dtype",
+            choices=["float32", "float16", "bfloat16"],
+            help="权重精度。内存不够时用 bfloat16（省一半，CPU 上支持良好）",
+        )
         p.add_argument("--model-name", help="覆盖配置里的模型名")
         p.add_argument("--repeats", type=int, help="重复划分次数")
+        p.add_argument("--test-size", type=float, default=0.2, help="A 组留出比例")
         p.add_argument("--json", action="store_true")
         p.set_defaults(func=func)
 
@@ -358,7 +484,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="复用 layer-sweep 留下的隐层缓存，跳过模型前向",
     )
-    p_run.add_argument("--test-size", type=float, default=0.2, help="A 组留出比例")
     p_run.add_argument("--title", help="报告标题")
     p_run.add_argument("--out", help="报告文件名")
 
