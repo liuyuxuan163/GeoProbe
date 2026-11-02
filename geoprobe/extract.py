@@ -149,20 +149,90 @@ def pool_activations(
     raise ValueError(f"未知的池化方式: {mode!r}（可选 {POOLING_MODES}）")
 
 
-def _entity_span(tokenizer: Any, text: str, full_length: int, has_instruction: bool) -> tuple[int, int]:
-    """找出"地名本身"在 token 序列里的位置区间。
+def _span_from_offsets(
+    offsets: Sequence[Sequence[int]], char_start: int, char_end: int
+) -> Optional[tuple[int, int]]:
+    """按**字符区间**反查 token 区间（左闭右开）；无重叠返回 ``None``。
 
-    没有任务指令时，地名就在开头（跳过可能的 BOS）；
-    有指令时，取指令文本之后的部分。
+    纯函数，便于单测。``offset_mapping`` 是每个 token 覆盖的字符区间，
+    BPE 可能把边界字符和后一个词合并（例如把指令末尾的空格与实体的首个
+    字母并成一个 token），所以判据取"**有交集**"而不是"完全落在区间内"。
+    """
+    start: Optional[int] = None
+    end: Optional[int] = None
+    for index, pair in enumerate(offsets):
+        token_start, token_end = int(pair[0]), int(pair[1])
+        if token_end <= char_start or token_start >= char_end:
+            continue
+        if start is None:
+            start = index
+        end = index + 1
+    if start is None or end is None:
+        return None
+    return (start, end)
+
+
+def _entity_span(
+    tokenizer: Any,
+    text: str,
+    full_length: int,
+    has_instruction: bool,
+    entity: Optional[str] = None,
+) -> tuple[int, int]:
+    """找出「地名本身」在 token 序列里的位置区间（左闭右开）。
+
+    **2026-10-30 修正两处真实 bug**
+    -------------------------------
+    1. 裸地名不再假设 BOS。旧实现返回 ``(1, full_length - 1)``，注释写的是
+       "位置 0 通常是 BOS"。但 Qwen2.5 的 tokenizer **不加 BOS**
+       （``add_special_tokens=True`` 时 ``Paris`` 就是 1 个 token），于是这个
+       span 的实际含义变成「丢掉第一个 subtoken，再丢掉最后一个」：
+
+       =========================  ==================  ==================
+       词                         旧 span 实际取到     应取到
+       =========================  ==================  ==================
+       ``Tokyo`` (Tok+yo)         ``yo``              两个都取
+       ``Ho Chi Minh City`` (4)   ``Chi``,``Minh``    4 个都取
+       ``Ulaanbaatar`` (5)        ``la``,``an``,``ba``  5 个都取
+       =========================  ==================  ==================
+
+       词表 319 个词里只有 22 个是单 token，**51% 的地名 token 被丢弃**。
+       现在裸地名直接返回 ``(0, full_length)`` —— 整个序列就是地名。
+
+    2. 有指令时改用 ``offset_mapping`` 反查。旧实现用
+       ``text[: text.find("{}")]`` 重算前缀长度，但传进来的 ``text`` 已经
+       被 ``.format()`` 过、里面**没有** ``{}`` 了，``find`` 恒为 -1 →
+       前缀长度恒为 0 → 又退化成"整段（再减一）"。现在按实体在 ``text``
+       里的字符区间去 offsets 里找 token 区间，BPE 跨边界合并也能对齐。
     """
     if not has_instruction:
-        # 裸地名：位置 1 到末尾（位置 0 通常是 BOS）
-        return (1, max(2, full_length - 1))
-    # 有指令：重新算"指令前缀"的长度
-    prefix = text[: text.find("{}")] if "{}" in text else ""
-    prefix_ids = tokenizer(prefix, add_special_tokens=False).get("input_ids", [])
-    start = len(prefix_ids)
-    return (start, max(start + 1, full_length - 1))
+        # 裸地名：整段 token 都是实体（没有 BOS/EOS 需要跳过）
+        return (0, max(1, int(full_length)))
+
+    fallback = (0, max(1, int(full_length) - 1))
+    if not entity:
+        return fallback
+
+    char_start = text.find(entity)
+    if char_start < 0:
+        return fallback
+    char_end = char_start + len(entity)
+
+    try:
+        encoded = tokenizer(
+            text, add_special_tokens=False, return_offsets_mapping=True
+        )
+        offsets = encoded.get("offset_mapping") or []
+    except (TypeError, ValueError, KeyError):  # 有些 tokenizer 不支持 offsets
+        return fallback
+
+    span = _span_from_offsets(offsets, char_start, char_end)
+    if span is None:
+        return fallback
+    start, end = span
+    if end <= start:
+        return fallback
+    return (start, min(end, int(full_length)))
 
 
 # --------------------------------------------------------------------------- #
@@ -378,7 +448,9 @@ class ActivationExtractor:
             for handle in handles:
                 handle.remove()
 
-        span = _entity_span(self._tokenizer, text, seq_len, self.use_instruction)
+        span = _entity_span(
+            self._tokenizer, text, seq_len, self.use_instruction, entity=word
+        )
         out: Dict[int, np.ndarray] = {}
         for idx in targets:
             hidden = captured.get(idx)

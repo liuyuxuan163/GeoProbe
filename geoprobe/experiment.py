@@ -99,8 +99,8 @@ class ExperimentResult:
     ambiguity_ratio: float = float("nan")
     ambiguity_comment: str = ""
 
-    baselines: Dict[str, Dict[str, float]] = field(default_factory=dict)
-    """各基线在 A 组留出集上的中位误差（km）"""
+    baselines: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    """各基线在 A 组留出集上的中位误差（km）+ 该行的采样规模 ``n_repeats``"""
 
     ambiguous_detail: List[Dict[str, Any]] = field(default_factory=list)
     """B 组逐词误差与预测坐标"""
@@ -134,11 +134,28 @@ class ExperimentResult:
 
         这比"优于预测均值基线"严谨得多 —— 后者在纯噪声特征上也能碰巧通过
         （因为随机特征过拟合后，个别点的预测会更接近真值，中位数会被拉低）。
+
+        **两边必须是同一采样规模**（2026-10-30 修正）
+        -------------------------------------------
+        左边用 ``control_repeats.median_mean``（R 次重复的均值），
+        不是 ``control.median_km``（**最后一次单次划分**）。
+
+        原因：``permuted`` 基线本身是 R 次重复的均值，拿"1 次划分"去比"R 次均值"
+        就成了苹果比橘子 —— 而且**哪一次划分排在最后**是随机的，判定会跟着抖。
+        实测 0.5B @ layer 6：单次划分 4,055 km → 4,055/6,154 = 0.66 判**失败**；
+        而 8 次均值 3,318 km → 3,318/6,154 = 0.54 判**通过**（且远优于
+        char_ngram 基线 5,246 km）。同一份数据给出相反结论，全是噪声。
         """
         permuted = self.baselines.get("permuted", {}).get("median_km")
-        if permuted is None or np.isnan(self.control.median_km) or permuted <= 0:
+        if permuted is None or not np.isfinite(permuted) or permuted <= 0:
             return False
-        return self.control.median_km < 0.6 * permuted
+        # ★ 用重复均值；只在没有重复记录时（手工构造的结果）退回单次划分
+        hidden = self.control_repeats.median_mean
+        if not np.isfinite(hidden):
+            hidden = self.control.median_km
+        if not np.isfinite(hidden):
+            return False
+        return bool(hidden < 0.6 * permuted)
 
     def summary_dict(self) -> Dict[str, Any]:
         return {
@@ -388,13 +405,20 @@ def run_experiment(
 
     # --- 基线 ---
     if run_baselines:
-        result.baselines = _run_baselines(config, lists, X_control, Y_control, test_size, encoder)
+        result.baselines = _run_baselines(
+            config, lists, X_control, Y_control, test_size, encoder, n_repeats=n_repeats
+        )
         result.baselines.setdefault("hidden", {})["median_km"] = control_repeats.median_mean
         result.baselines["hidden"]["median_std_km"] = control_repeats.median_std
+        # n_repeats 一并写进 JSON：让「这一行的 ±std 是几次划分算出来的」可见。
+        # （hidden 用的就是主实验的 n_repeats，其余基线默认也跟随它 —— 见 _run_baselines）
+        result.baselines["hidden"]["n_repeats"] = len(control_repeats.medians)
 
     # --- 备选探针（MLP 对照）---
     if "mlp" in probe_kinds:
-        result.baselines["mlp"] = _run_single_probe(config, "mlp", X_control, Y_control, test_size, encoder)
+        result.baselines["mlp"] = _run_single_probe(
+            config, "mlp", X_control, Y_control, test_size, encoder, n_repeats=n_repeats
+        )
 
     # --- 警告 ---
     if extract_results is None:  # pragma: no cover - 防御
@@ -427,16 +451,29 @@ def _run_baselines(
     Y_control: np.ndarray,
     test_size: float,
     encoder: Optional[TargetEncoder] = None,
-) -> Dict[str, Dict[str, float]]:
+    n_repeats: Optional[int] = None,
+) -> Dict[str, Dict[str, Any]]:
     """在 A 组留出集上跑各基线，返回中位误差。
 
     ``encoder`` 必须与主实验一致 —— 否则基线在"线性目标"上拟合、
     主探针在"sincos 目标"上拟合，两者不可比。
+
+    ``n_repeats`` 的优先级：**显式配置 > 调用方传入 > 5**。
+
+    为什么默认要跟随主实验（而不是写死 5）
+    --------------------------------------
+    基线表和主结果（``baselines["hidden"]``）是放在**同一张表**里给人看的。
+    如果 hidden 用 8 次划分算 std、其余 4 行用 5 次，两列 ``±std`` 的采样规模
+    就不同 —— 读者会误判「隐层更不稳」。更实质的问题是**配对性**：
+    种子 42..46 与 42..49 不是同一组划分，差值变成「各自平均后相减」，
+    而不是同一批划分上的配对差。跟随 ``--repeats`` 后，两者同种子、同划分。
     """
     encoder = encoder or TargetEncoder("latlon")
     Y_enc = encoder.encode(Y_control)
-    out: Dict[str, Dict[str, float]] = {}
-    n_repeats = max(1, int(config.get("baselines.n_repeats", 5) or 5))
+    out: Dict[str, Dict[str, Any]] = {}
+    # ★ 优先级：显式配置 > 调用方（= 主实验的 --repeats）> 5
+    configured = config.get("baselines.n_repeats")
+    n_repeats = max(1, int(configured if configured is not None else (n_repeats or 5)))
 
     features = build_baseline_features(config, lists, hidden_dim=X_control.shape[1])
 
@@ -451,7 +488,11 @@ def _run_baselines(
             pred = encoder.decode(probe.predict(X_control[test_idx]))
             stats = evaluate_predictions(Y_control[test_idx], pred, bootstrap_samples=200, seed=seed)
             medians.append(stats.median_km)
-        out["mean"] = {"median_km": float(np.mean(medians)), "median_std_km": float(np.std(medians))}
+        out["mean"] = {
+            "median_km": float(np.mean(medians)),
+            "median_std_km": float(np.std(medians)),
+            "n_repeats": n_repeats,
+        }
 
     # 置换基线：打乱训练集的坐标，用同样的 X 拟合，再在真实测试集上评估
     if bool(config.get("baselines.permuted", True)):
@@ -470,6 +511,7 @@ def _run_baselines(
         out["permuted"] = {
             "median_km": float(np.mean(permuted_medians)),
             "median_std_km": float(np.std(permuted_medians)),
+            "n_repeats": n_repeats,
         }
 
     # 随机 / 字符 n-gram 基线
@@ -488,7 +530,11 @@ def _run_baselines(
                 Y_control[test_idx], pred, bootstrap_samples=200, seed=seed
             )
             medians.append(stats.median_km)
-        out[kind] = {"median_km": float(np.mean(medians)), "median_std_km": float(np.std(medians))}
+        out[kind] = {
+            "median_km": float(np.mean(medians)),
+            "median_std_km": float(np.std(medians)),
+            "n_repeats": n_repeats,
+        }
 
     return out
 
@@ -500,10 +546,17 @@ def _run_single_probe(
     Y: np.ndarray,
     test_size: float,
     encoder: Optional[TargetEncoder] = None,
-    n_repeats: int = 3,
-) -> Dict[str, float]:
+    n_repeats: int = 5,
+) -> Dict[str, Any]:
+    """跑一个对照探针（目前只有 MLP），返回 ``{median_km, median_std_km, n_repeats}``。
+
+    ``n_repeats`` 默认值历史上写死成 3，导致 MLP 对照与主结果的采样规模又对不上
+    （与基线 5 vs 8 是同一类问题）。现在 ``run_experiment`` 会显式把主实验的
+    ``n_repeats`` 传进来。
+    """
     encoder = encoder or TargetEncoder("latlon")
     Y_enc = encoder.encode(Y)
+    n_repeats = max(1, int(n_repeats))
     medians = []
     for repeat in range(n_repeats):
         seed = int(config.get("probe.random_state", 42)) + repeat
@@ -513,7 +566,11 @@ def _run_single_probe(
         pred = encoder.decode(probe.predict(X[test_idx]))
         stats = evaluate_predictions(Y[test_idx], pred, bootstrap_samples=200, seed=seed)
         medians.append(stats.median_km)
-    return {"median_km": float(np.mean(medians)), "median_std_km": float(np.std(medians))}
+    return {
+        "median_km": float(np.mean(medians)),
+        "median_std_km": float(np.std(medians)),
+        "n_repeats": n_repeats,
+    }
 
 
 def save_result(result: ExperimentResult, path: str | Path) -> Path:
