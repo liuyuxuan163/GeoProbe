@@ -38,6 +38,10 @@ docs/*
 !docs/跨模型对比.md
 !docs/扩充后结果分析.md
 !docs/稳定性与表征几何.md
+# 图片单独放行：README 要引用它们，所以必须能提交
+# （生成方式：python scripts/plot_results.py）
+!docs/figures/
+!docs/figures/*.png
 
 # 其余 docs 的具体内容（写在这里是为了让读者知道它们存在、为什么被排除）：
 #   docs/一小时收尾清单.md          —— 简历措辞 + 面试策略 + 自我复盘
